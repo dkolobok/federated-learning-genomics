@@ -1,0 +1,23 @@
+fold_count: 10
+node_count: 19 
+ukb_dataset: '/gpfs/gpfs0/ukb_data/processed_data/fml'
+phenotype: 
+  type: 'real'
+phenotype_codes:
+  standing_height: 50
+  platelet_volume: 30100
+  erythrocyte_count: 30010
+  triglycerides: 30870
+  hdl_cholesterol: 30760
+  vitamin_d: 30890
+  creatinine: 30700
+  alkaline_phosphatase: 30610
+  cystatin_c: 30720
+  gamma_glutamyltransferase: 30730
+  ebmd: 3148
+  apolipoprotein_a: 30630
+  shbg: 30630
+
+covariates: 
+  '31': 'sex'
+  '21003': 'age' 

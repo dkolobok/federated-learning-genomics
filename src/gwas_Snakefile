@@ -1,0 +1,251 @@
+from pathlib import Path
+
+
+FOLD_COUNT = config['fold_count']
+NODE_COUNT = config['node_count']
+UKB_DATASET = config['ukb_dataset']
+
+PARTS = ['train', 'val', 'test']
+PLINK_EXT = ['bed', 'bim', 'fam']
+PLINK2_EXT = ['pgen', 'pvar', 'psam']
+TRAIN_PCA_EXT = ['acount', 'eigenval', 'eigenvec', 'eigenvec.allele']
+
+PHENOTYPE_CODES = config['phenotype_codes']
+PHENOTYPE_TYPE = config['phenotype']['type']
+COVARIATES = config['covariates'] 
+
+MODELS = ['lassonet', 'lasso', 'mlp']
+
+
+rule ALL:
+    input:
+        gwas=expand("gwas/{phenotype}/node_{node}/fold_{fold}.gwas.tsv",
+                            phenotype=list(PHENOTYPE_CODES.keys()),
+                            node=range(NODE_COUNT+1),
+                            fold=range(FOLD_COUNT)),
+        metagwas=expand("gwas/{phenotype}/fold_{fold}.meta.tsv",
+                        fold=range(FOLD_COUNT),
+                        phenotype=list(PHENOTYPE_CODES.keys())),
+        phenotypes=expand("phenotypes/{phenotype}/node_{node}/fold_{fold}_{part}.tsv",
+                          phenotype=list(PHENOTYPE_CODES.keys()),
+                          node=range(NODE_COUNT+1),
+                          fold=range(FOLD_COUNT),
+                          part=PARTS)
+
+rule save_node_gts:
+    input:
+        split_ids   = "split_ids/node_{node}/fold_{fold}_{part}.tsv",
+        source_genotype    = "genotypes/node_{node}_filtered.pgen"
+    resources:
+        time        = "01:00:00",
+        mem_mb      = 48000,
+        partition   = "gpu_devel"
+    params:
+        in_prefix = "genotypes/node_{node}_filtered",
+        out_prefix = "genotypes/node_{node}/fold_{fold}_{part}"
+    output:
+        genotype    = "genotypes/node_{node}/fold_{fold}_{part}.pgen"
+    shell:
+        """
+            plink2 --pfile {params.in_prefix} \
+                   --keep {input.split_ids} \
+                   --out {params.out_prefix} \
+                   --make-pgen
+        """
+
+
+
+rule train_pca:
+    input:
+        genotype    = "genotypes/node_{node}/fold_{fold}_train.pgen"
+    resources:
+        time        = "05:00:00",
+        mem_mb      = 24000,
+        partition   = "gpu",
+        gpus        = 1
+    threads: 4
+    params:
+        in_prefix = "genotypes/node_{node}/fold_{fold}_train",
+        out_prefix = "pca/node_{node}/fold_{fold}_train_projections"
+    output:
+        train_eigenvec = "pca/node_{node}/fold_{fold}_train_projections.eigenvec"
+    shell:
+        """
+            plink2 --pfile {params.in_prefix} \
+                   --out {params.out_prefix} \
+                   --freq counts --pca allele-wts 20 approx --threads 4
+        """
+
+rule pca_project:
+    input:
+        genotype    = "genotypes/node_{node}/fold_{fold}_{part}.pgen",
+        train_eigenvec = "pca/node_{node}/fold_{fold}_train_projections.eigenvec"
+    resources:
+        time        = "01:30:00",
+        mem_mb      = 32000,
+        partition   = "gpu_devel"
+    params:
+        in_prefix = "genotypes/node_{node}/fold_{fold}_{part}",
+        eigenvec_allele = "pca/node_{node}/fold_{fold}_train_projections.eigenvec.allele",
+        acount = "pca/node_{node}/fold_{fold}_train_projections.acount",
+        out_prefix = "pca/node_{node}/fold_{fold}_{part}_projections"
+    output:
+        projections = "pca/node_{node}/fold_{fold}_{part}_projections.sscore"
+    shell:
+        """
+            plink2 --pfile {params.in_prefix} \
+                   --read-freq {params.acount}\
+                   --score {params.eigenvec_allele} 2 5 header-read no-mean-imputation variance-standardize\
+                   --score-col-nums 6-25 \
+                   --out {params.out_prefix} --threads 4
+        """
+
+rule prepare_phenotypes_and_covariates:
+    input:
+        split_ids   = "split_ids/node_{node}/fold_{fold}_{part}.tsv",
+        pca         = "pca/node_{node}/fold_{fold}_{part}_projections.sscore",
+        dataset     = UKB_DATASET
+    resources:
+        time = "0:10:00",
+        mem_mb = 1000,
+        partition = "cpu"
+    params:
+        phenotype_name  = lambda wildcards: wildcards.phenotype,
+        phenotype_code  = lambda wildcards: PHENOTYPE_CODES[wildcards.phenotype],
+        phenotype_type  = PHENOTYPE_TYPE,
+        covariates      = COVARIATES
+    log:
+        "logs/prepare_phenotypes_and_covariates/{phenotype}/node_{node}/fold_{fold}_{part}.log"
+    output:
+        phenotypes  = "phenotypes/{phenotype}/node_{node}/fold_{fold}_{part}.tsv",
+        covariates  = "covariates/{phenotype}/node_{node}/fold_{fold}_{part}.tsv"
+    script:
+        "preprocess/phenotypes_covariates.py"
+
+rule normalize_covariates:
+    input:
+        train   = "covariates/{phenotype}/node_{node}/fold_{fold}_train.tsv"
+    resources:
+        time = "0:10:00",
+        mem_mb = 1000,
+        partition = "cpu"
+    params:
+        to_normalize = ['age']
+    log: "logs/normalize_covariates/{phenotype}/node_{node}/fold_{fold}_train.log"
+    output:
+        train   = "covariates/{phenotype}/node_{node}/fold_{fold}_train.tsv.normalized"
+    script:
+        "preprocess/normalize_covariates.py"
+
+rule gwas:
+    input: 
+        genotype    = "genotypes/node_{node}/fold_{fold}_train.pgen",
+        phenotype   = "phenotypes/{phenotype}/node_{node}/fold_{fold}_train.tsv",
+        covariates  = "covariates/{phenotype}/node_{node}/fold_{fold}_train.tsv.normalized"
+    threads: 4
+    resources:
+        time        = "3:30:00",
+        mem_mb      = 16000,
+        partition   = "gpu",
+        gpus        = 1,
+    params:
+        out_prefix      = "gwas/{phenotype}/node_{node}/fold_{fold}",
+        phenotype_name  = lambda wildcards: wildcards.phenotype,
+        phenotype_type  = PHENOTYPE_TYPE
+    log: "logs/gwas/{phenotype}/node_{node}/fold_{fold}.log"
+    output:
+        results     = "gwas/{phenotype}/node_{node}/fold_{fold}.gwas.tsv"
+    script:
+        "dimred/gwas.py"
+
+rule metagwas:
+    input:
+        gwas = expand("gwas/{{phenotype}}/node_{node}/fold_{{fold}}.gwas.tsv", node=range(NODE_COUNT))
+    output:
+        meta_gwas = "gwas/{phenotype}/fold_{fold}.meta"
+    params:
+        out_prefix = "gwas/{phenotype}/fold_{fold}"
+    shell: "plink19 --meta-analysis {input.gwas}  + qt --meta-analysis-snp-field 'ID' --meta-analysis-chr-field '#CHROM' --meta-analysis-bp-field 'POS' --out {params.out_prefix}"
+
+rule reformat_metagwas:
+    input:
+        report = "gwas/{phenotype}/fold_{fold}.meta"
+    output: 
+        reformatted = "gwas/{phenotype}/fold_{fold}.meta.tsv"
+    run:
+        import pandas as pd
+        df = pd.read_table(input.report, delim_whitespace=True).rename(columns={'SNP': 'ID'})
+        df['LOG10_P'] = 1 - df.loc[:, 'P(R)']
+        df.to_csv(output.reformatted, index=False, sep='\t')
+        
+'''
+
+rule local_datasets:
+    input:
+        gwas        = rules.gwas.output['results'],
+        phenotype   = "phenotypes/{phenotype}/node_{node}/fold_{fold}_{part}.tsv",
+        genotype    = "genotypes/node_{node}/fold_{fold}_{part}.pgen"
+    threads: 2
+    resources:
+        time        = "00:20:00",
+        mem_mb      = 8000,
+        partition   = "gpu_devel"
+    params:
+        in_prefix   = "genotypes/node_{node}/fold_{fold}_{part}",
+        out_prefix  = "genotypes/{phenotype}/node_{node}/fold_{fold}/top_{snp_count}_{part}"
+    log:
+        "logs/local_datasets/{phenotype}/node_{node}/fold_{fold}/top_{snp_count}_{part}.log"
+    output:
+        dataset     = "genotypes/{phenotype}/node_{node}/fold_{fold}/top_{snp_count}_{part}.pgen"
+    script:
+        "dimred/topk.py"
+
+rule union_snplists:
+    input:
+        gwases      = [expand("gwas/{{phenotype}}/node_{node}/fold_{{fold}}.gwas.tsv", node=node) for node in range(len(ETHNICITIES))]
+    resources:
+        time        = "00:05:00",
+        mem_mb      = 8000,
+        partition   = "gpu_devel"
+    log:
+        "logs/union_snplists/{phenotype}/fold_{fold}/top_{snp_count}.log"
+    output:
+        snplist     = "genotypes/{phenotype}/fold_{fold}/union/top_{snp_count}.snplist"      
+    script:
+        "dimred/union.py"
+
+rule union_datasets:
+    input:
+        phenotype   = "phenotypes/{phenotype}/node_{node}/fold_{fold}_{part}.tsv",
+        genotype    = "genotypes/node_{node}/fold_{fold}_{part}.pgen",
+        snplist     = rules.union_snplists.output['snplist']
+    resources:
+        time        = "00:05:00",
+        mem_mb      = 8000,
+        partition   = "gpu_devel"
+    params:
+        in_prefix   = "genotypes/node_{node}/fold_{fold}_{part}",
+        out_prefix  = "genotypes/{phenotype}/node_{node}/fold_{fold}/union/top_{snp_count}_{part}"
+    output:
+        dataset     = "genotypes/{phenotype}/node_{node}/fold_{fold}/union/top_{snp_count}_{part}.pgen"
+    shell:
+        """
+            plink2 --pfile {params.in_prefix} \
+                   --extract {input.snplist} \
+                   --keep {input.phenotype} \
+                   --make-pgen --out {params.out_prefix}
+        """
+
+
+rule local_lassonet:
+    input:
+        genotype    = expand("genotypes/{{phenotype}}/node_{{node}}/fold_{{fold}}/top_{{snp_count}}_{part}.pgen", part=PARTS),
+        phenotype   = expand("phenotypes/{{phenotype}}/node_{{node}}/fold_{{fold}}_{part}.tsv", part=PARTS),
+        covariates  = expand("covariates/{{phenotype}}/node_{{node}}/fold_{{fold}}_{part}.tsv", part=PARTS)
+    params:
+        pfile = lambda wildcards, input: [Path(inp).with_suffix('') for inp in input.genotype]
+    output:
+        results     = "results/{phenotype}/node_{node}/fold_{fold}/top_{snp_count}_lassonet.tsv" 
+    script:
+        "local/lassonet.py"
+'''

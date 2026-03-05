@@ -1,0 +1,5 @@
+name: exponential_lr
+rounds: ${server.rounds}
+max_rounds: 8192
+epochs_in_round: ${div:${.max_rounds},${.rounds}}
+gamma: 0.999

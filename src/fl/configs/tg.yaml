@@ -1,0 +1,44 @@
+defaults:
+  - _self_
+  - experiment: tg
+  - model: mlp_classifier
+  - optimizer: sgd
+  - scheduler: exponential_lr
+  - training: default
+  - split: superpop
+  - strategy: fedavg
+
+study: tg
+log_weights: False
+log_grad: False
+fold:
+  index: 0
+node:
+  index: ???
+  name: ???
+
+server:
+  rounds: 8
+  checkpoint_dir: 'models/${data.phenotype.name}/fold_${fold.index}'
+  port: 8888
+
+data:
+  genotype:
+    root: ${split.path}/genotypes/${node.index}/fold_${fold.index}
+    train: ${.root}_train
+    val: ${.root}_val
+    test: ${.root}_test
+
+  x_reduced:
+    normalize_stds: True
+    root: ${split.path}/federated_pca/${node.index}/fold_${fold.index}
+    train: ${.root}_train_projections.csv.eigenvec.sscore
+    val: ${.root}_val_projections.csv.eigenvec.sscore
+    test: ${.root}_test_projections.csv.eigenvec.sscore
+
+  phenotype:
+    name: ancestry
+    root: ${split.path}/only_phenotypes/ancestry/${node.index}/fold_${fold.index}
+    train: ${.root}_train.tsv
+    val: ${.root}_val.tsv
+    test: ${.root}_test.tsv
